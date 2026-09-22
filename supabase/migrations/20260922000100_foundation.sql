@@ -75,6 +75,7 @@ create table public.categories (
   organization_id uuid not null references public.organizations(id) on delete cascade,
   name text not null,
   created_at timestamptz not null default now(),
+  unique (organization_id, id),
   unique (organization_id, name)
 );
 
@@ -89,7 +90,7 @@ create table public.units (
 create table public.products (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete cascade,
-  category_id uuid references public.categories(id) on delete set null,
+  category_id uuid,
   name text not null,
   sku text,
   barcode text,
@@ -103,8 +104,11 @@ create table public.products (
   reorder_level numeric(18, 6) check (reorder_level is null or reorder_level >= 0),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  unique (organization_id, id),
   unique (organization_id, sku),
   unique (organization_id, barcode),
+  constraint products_category_org_fk foreign key (organization_id, category_id)
+    references public.categories(organization_id, id) on delete set null,
   constraint products_direct_fields check (
     tracking_method <> 'DIRECT'
     or (direct_unit_code is not null and reorder_level is not null)
@@ -123,28 +127,35 @@ create table public.stock_items (
   status public.record_status not null default 'ACTIVE',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  unique (organization_id, id),
   unique (organization_id, sku)
 );
 
 create table public.recipes (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete cascade,
-  product_id uuid not null references public.products(id) on delete restrict,
+  product_id uuid not null,
   name text not null,
   created_at timestamptz not null default now(),
-  unique (organization_id, product_id)
+  unique (organization_id, id),
+  unique (organization_id, product_id),
+  constraint recipes_product_org_fk foreign key (organization_id, product_id)
+    references public.products(organization_id, id) on delete restrict
 );
 
 create table public.recipe_versions (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete cascade,
-  recipe_id uuid not null references public.recipes(id) on delete cascade,
+  recipe_id uuid not null,
   version integer not null check (version > 0),
   yield_quantity numeric(18, 6) not null default 1 check (yield_quantity > 0),
   effective_at timestamptz not null default now(),
   is_active boolean not null default false,
   created_at timestamptz not null default now(),
-  unique (recipe_id, version)
+  unique (organization_id, id),
+  unique (recipe_id, version),
+  constraint recipe_versions_recipe_org_fk foreign key (organization_id, recipe_id)
+    references public.recipes(organization_id, id) on delete cascade
 );
 
 create unique index recipe_versions_one_active_per_recipe
@@ -154,18 +165,22 @@ create unique index recipe_versions_one_active_per_recipe
 create table public.recipe_items (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete cascade,
-  recipe_version_id uuid not null references public.recipe_versions(id) on delete cascade,
-  stock_item_id uuid not null references public.stock_items(id) on delete restrict,
+  recipe_version_id uuid not null,
+  stock_item_id uuid not null,
   quantity numeric(18, 6) not null check (quantity > 0),
   unit_code text not null references public.units(code),
   converted_base_quantity numeric(18, 6) not null check (converted_base_quantity > 0),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint recipe_items_version_org_fk foreign key (organization_id, recipe_version_id)
+    references public.recipe_versions(organization_id, id) on delete cascade,
+  constraint recipe_items_stock_org_fk foreign key (organization_id, stock_item_id)
+    references public.stock_items(organization_id, id) on delete restrict
 );
 
 create table public.inventory_movements (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete restrict,
-  product_id uuid not null references public.products(id) on delete restrict,
+  product_id uuid not null,
   movement_type public.inventory_movement_type not null,
   quantity_delta numeric(18, 6) not null check (quantity_delta <> 0),
   unit_cost numeric(18, 6) check (unit_cost is null or unit_cost >= 0),
@@ -173,13 +188,15 @@ create table public.inventory_movements (
   source_id uuid,
   note text,
   created_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint inventory_movements_product_org_fk foreign key (organization_id, product_id)
+    references public.products(organization_id, id) on delete restrict
 );
 
 create table public.stock_movements (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete restrict,
-  stock_item_id uuid not null references public.stock_items(id) on delete restrict,
+  stock_item_id uuid not null,
   movement_type public.stock_movement_type not null,
   quantity_delta numeric(18, 6) not null check (quantity_delta <> 0),
   unit_cost numeric(18, 6) check (unit_cost is null or unit_cost >= 0),
@@ -187,7 +204,9 @@ create table public.stock_movements (
   source_id uuid,
   note text,
   created_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint stock_movements_item_org_fk foreign key (organization_id, stock_item_id)
+    references public.stock_items(organization_id, id) on delete restrict
 );
 
 create table public.accounts (
@@ -198,6 +217,7 @@ create table public.accounts (
   category public.account_category not null,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
+  unique (organization_id, id),
   unique (organization_id, code)
 );
 
@@ -223,20 +243,27 @@ create table public.journal_entries (
   status public.journal_status not null default 'DRAFT',
   posted_at timestamptz,
   posted_by uuid references auth.users(id) on delete set null,
-  reversal_of_entry_id uuid references public.journal_entries(id) on delete restrict,
-  created_at timestamptz not null default now()
+  reversal_of_entry_id uuid,
+  created_at timestamptz not null default now(),
+  unique (organization_id, id),
+  constraint journal_entries_reversal_org_fk foreign key (organization_id, reversal_of_entry_id)
+    references public.journal_entries(organization_id, id) on delete restrict
 );
 
 create table public.journal_lines (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete restrict,
-  journal_entry_id uuid not null references public.journal_entries(id) on delete cascade,
-  account_id uuid not null references public.accounts(id) on delete restrict,
+  journal_entry_id uuid not null,
+  account_id uuid not null,
   debit numeric(18, 4) not null default 0 check (debit >= 0),
   credit numeric(18, 4) not null default 0 check (credit >= 0),
   memo text,
   created_at timestamptz not null default now(),
-  check ((debit > 0 and credit = 0) or (credit > 0 and debit = 0))
+  check ((debit > 0 and credit = 0) or (credit > 0 and debit = 0)),
+  constraint journal_lines_entry_org_fk foreign key (organization_id, journal_entry_id)
+    references public.journal_entries(organization_id, id) on delete cascade,
+  constraint journal_lines_account_org_fk foreign key (organization_id, account_id)
+    references public.accounts(organization_id, id) on delete restrict
 );
 
 create table public.audit_logs (
@@ -333,7 +360,12 @@ declare
   total_debit numeric(18,4);
   total_credit numeric(18,4);
 begin
-  if new.status = 'POSTED' and old.status is distinct from 'POSTED' then
+  if tg_op = 'UPDATE' and old.status = 'POSTED' and new is distinct from old then
+    raise exception 'posted journal entries are immutable; create a reversal/correction entry';
+  end if;
+
+  if new.status = 'POSTED'
+     and (tg_op = 'INSERT' or old.status is distinct from 'POSTED') then
     select coalesce(sum(debit),0), coalesce(sum(credit),0)
       into total_debit, total_credit
       from public.journal_lines
@@ -345,10 +377,6 @@ begin
 
     new.posted_at := coalesce(new.posted_at, now());
     new.posted_by := coalesce(new.posted_by, (select auth.uid()));
-  end if;
-
-  if old.status = 'POSTED' and new is distinct from old then
-    raise exception 'posted journal entries are immutable; create a reversal/correction entry';
   end if;
 
   return new;
@@ -364,7 +392,7 @@ before update or delete on public.stock_movements
 for each row execute function private.prevent_immutable_row_change();
 
 create trigger posted_journal_guard
-before update on public.journal_entries
+before insert or update on public.journal_entries
 for each row execute function private.enforce_posted_journal_balance();
 
 create or replace function private.prevent_posted_journal_line_change()
@@ -377,18 +405,22 @@ declare
 begin
   select status into parent_status
   from public.journal_entries
-  where id = coalesce(old.journal_entry_id, new.journal_entry_id);
+  where id = case when tg_op = 'DELETE' then old.journal_entry_id else new.journal_entry_id end;
 
   if parent_status = 'POSTED' then
     raise exception 'posted journal lines are immutable';
   end if;
 
-  return coalesce(new, old);
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+
+  return new;
 end;
 $$;
 
 create trigger journal_lines_posted_guard
-before update or delete on public.journal_lines
+before insert or update or delete on public.journal_lines
 for each row execute function private.prevent_posted_journal_line_change();
 
 alter table public.profiles enable row level security;
