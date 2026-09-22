@@ -1,0 +1,12 @@
+.env
+.env.local
+.env.*.local
+!.env.example
+.next/
+out/
+node_modules/
+coverage/
+.DS_Store
+*.log
+.vercel/
+supabase/.temp/
