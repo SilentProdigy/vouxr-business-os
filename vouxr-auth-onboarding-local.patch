@@ -1,0 +1,887 @@
+diff --git a/docs/LOCAL_DEVELOPMENT.md b/docs/LOCAL_DEVELOPMENT.md
+new file mode 100644
+index 0000000..a8c9338
+--- /dev/null
++++ b/docs/LOCAL_DEVELOPMENT.md
+@@ -0,0 +1,109 @@
++# Local Development
++
++This project is designed to be tested against a local Supabase stack before changes are pushed remotely.
++
++## 1. Work from the foundation branch
++
++If the foundation PR has not been merged into `main` yet:
++
++```bash
++git fetch origin
++git switch foundation
++```
++
++Keep the authentication/onboarding changes uncommitted while testing if you want a fully local-first workflow.
++
++## 2. Install dependencies
++
++```bash
++npm install
++```
++
++The repository pins package versions. `npm install` creates `package-lock.json`; keep it once the local build is confirmed.
++
++## 3. Start local Supabase
++
++Docker Desktop (or another Docker-compatible runtime) must be running.
++
++```bash
++npx supabase start
++```
++
++Then inspect the local credentials:
++
++```bash
++npx supabase status
++```
++
++## 4. Reset the local database
++
++Apply every migration from a clean database:
++
++```bash
++npx supabase db reset
++```
++
++This is destructive to the **local** Supabase database only.
++
++## 5. Configure the local app environment
++
++Create `.env.local`:
++
++```env
++NEXT_PUBLIC_APP_NAME=Vouxr Business OS
++NEXT_PUBLIC_SITE_URL=http://localhost:3000
++NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
++NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<local public/publishable or anon key from supabase status>
++```
++
++The local public/anon client key is intentionally stored in the browser-facing variable. Never put a secret/service-role key in a `NEXT_PUBLIC_` variable.
++
++## 6. Run static checks and the app
++
++```bash
++npm run typecheck
++npm run build
++npm run dev
++```
++
++Open `http://localhost:3000`.
++
++## 7. Test the vertical slice
++
++1. Open `/signup` and create a local user.
++2. You should land on `/onboarding` because local email confirmation is disabled in `supabase/config.toml`.
++3. Create a recipe-based business.
++4. Confirm `/dashboard` shows Stocks and Recipes and reports 17 chart-of-accounts entries.
++5. Sign out and sign back in.
++6. Confirm you return to `/dashboard` rather than onboarding.
++7. Reset the local DB, repeat with `DIRECT_INVENTORY`, and confirm Stocks and Recipes are hidden.
++
++## 8. Verify the database locally
++
++Use local Supabase Studio (the URL is shown by `npx supabase status`) and verify:
++
++- `organizations`: one row for the business
++- `organization_members`: the signed-in user has role `OWNER`
++- `accounts`: 17 rows for the organization
++- `audit_logs`: one `ORGANIZATION_CREATED` entry
++- all business rows carry the same `organization_id`
++
++Also test that creating a second business with the same slug fails.
++
++## 9. Before committing
++
++Do not push until all of these pass:
++
++```bash
++npm run typecheck
++npm run build
++```
++
++Then review:
++
++```bash
++git status
++git diff
++```
++
++Commit `package-lock.json` together with the source once dependency installation and the build are confirmed.
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..e459a32
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse, type NextRequest } from "next/server";
++import { createSupabaseServerClient } from "@/lib/supabase/server";
++
++export async function GET(request: NextRequest) {
++  const url = new URL(request.url);
++  const code = url.searchParams.get("code");
++  const requestedNext = url.searchParams.get("next");
++  const next =
++    requestedNext && requestedNext.startsWith("/") && !requestedNext.startsWith("//")
++      ? requestedNext
++      : "/dashboard";
++
++  if (code) {
++    const supabase = await createSupabaseServerClient();
++    const { error } = await supabase.auth.exchangeCodeForSession(code);
++
++    if (!error) {
++      return NextResponse.redirect(new URL(next, request.url));
++    }
++  }
++
++  return NextResponse.redirect(
++    new URL(`/login?error=${encodeURIComponent("Authentication link is invalid or expired.")}`, request.url),
++  );
++}
+diff --git a/src/app/dashboard/actions.ts b/src/app/dashboard/actions.ts
+new file mode 100644
+index 0000000..c0522ad
+--- /dev/null
++++ b/src/app/dashboard/actions.ts
+@@ -0,0 +1,10 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { createSupabaseServerClient } from "@/lib/supabase/server";
++
++export async function signOutAction() {
++  const supabase = await createSupabaseServerClient();
++  await supabase.auth.signOut();
++  redirect("/login");
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+new file mode 100644
+index 0000000..30b9e99
+--- /dev/null
++++ b/src/app/dashboard/page.tsx
+@@ -0,0 +1,106 @@
++import { redirect } from "next/navigation";
++import {
++  Boxes,
++  Calculator,
++  ChefHat,
++  CircleDollarSign,
++  LogOut,
++  PackageCheck,
++  ReceiptText,
++  Store,
++} from "lucide-react";
++import { requireUser } from "@/lib/auth/require-user";
++import { signOutAction } from "./actions";
++
++export default async function DashboardPage() {
++  const { supabase } = await requireUser();
++  const { data: organization, error: organizationError } = await supabase
++    .from("organizations")
++    .select("id,name,slug,inventory_model,currency_code,timezone")
++    .order("created_at", { ascending: true })
++    .limit(1)
++    .maybeSingle();
++
++  if (organizationError) {
++    throw new Error(`Unable to load organization: ${organizationError.message}`);
++  }
++
++  if (!organization) {
++    redirect("/onboarding");
++  }
++
++  const [productsResult, stocksResult, accountsResult] = await Promise.all([
++    supabase.from("products").select("id", { count: "exact", head: true }).eq("organization_id", organization.id),
++    supabase.from("stock_items").select("id", { count: "exact", head: true }).eq("organization_id", organization.id),
++    supabase.from("accounts").select("id", { count: "exact", head: true }).eq("organization_id", organization.id),
++  ]);
++
++  const isRecipeBusiness = organization.inventory_model === "RECIPE_AND_STOCK";
++  const modules = [
++    { name: "Sales", detail: "POS, invoices, credit sales and payments", icon: ReceiptText },
++    { name: "Products", detail: `${productsResult.count ?? 0} products configured`, icon: Store },
++    { name: "Inventory", detail: "Direct-stock movements and valuation", icon: Boxes },
++    ...(isRecipeBusiness
++      ? [
++          { name: "Stocks", detail: `${stocksResult.count ?? 0} ingredient items configured`, icon: PackageCheck },
++          { name: "Recipes", detail: "Recipe versions, costing and availability", icon: ChefHat },
++        ]
++      : []),
++    { name: "Accounting", detail: `${accountsResult.count ?? 0} chart-of-accounts entries`, icon: Calculator },
++  ];
++
++  return (
++    <main className="mx-auto min-h-screen max-w-7xl px-5 py-8 sm:px-8 lg:px-10">
++      <header className="flex flex-col gap-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
++        <div>
++          <p className="text-xs font-black uppercase tracking-[0.24em] text-sky-600">Vouxr Business OS</p>
++          <h1 className="mt-1 text-2xl font-black tracking-tight text-slate-950">{organization.name}</h1>
++          <p className="mt-1 text-sm font-medium text-slate-500">
++            {organization.inventory_model === "RECIPE_AND_STOCK" ? "Recipe + stock business" : "Direct inventory business"}
++            {" · "}{organization.currency_code}{" · "}{organization.timezone}
++          </p>
++        </div>
++        <form action={signOutAction}>
++          <button className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-black text-slate-700 hover:bg-slate-50">
++            <LogOut className="h-4 w-4" />
++            Sign out
++          </button>
++        </form>
++      </header>
++
++      <section className="mt-7 grid gap-4 sm:grid-cols-3">
++        <article className="rounded-3xl bg-slate-950 p-6 text-white">
++          <CircleDollarSign className="h-6 w-6 text-sky-300" />
++          <p className="mt-5 text-xs font-black uppercase tracking-[0.2em] text-slate-400">Foundation</p>
++          <p className="mt-2 text-2xl font-black">Ready for transactions</p>
++          <p className="mt-2 text-sm leading-6 text-slate-300">Organization, roles, chart of accounts, and RLS are initialized.</p>
++        </article>
++        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
++          <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">Business slug</p>
++          <p className="mt-3 text-xl font-black text-slate-950">{organization.slug}</p>
++        </article>
++        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
++          <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">Accounting setup</p>
++          <p className="mt-3 text-xl font-black text-slate-950">{accountsResult.count ?? 0} accounts</p>
++          <p className="mt-2 text-sm text-slate-500">Default V1 chart of accounts seeded during onboarding.</p>
++        </article>
++      </section>
++
++      <section className="mt-8">
++        <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-600">Workspace</p>
++        <h2 className="mt-2 text-3xl font-black tracking-tight text-slate-950">Modules</h2>
++        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
++          {modules.map(({ name, detail, icon: Icon }) => (
++            <article key={name} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
++              <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100">
++                <Icon className="h-5 w-5 text-slate-700" />
++              </div>
++              <h3 className="mt-5 text-lg font-black text-slate-950">{name}</h3>
++              <p className="mt-2 text-sm leading-6 text-slate-600">{detail}</p>
++            </article>
++          ))}
++        </div>
++      </section>
++    </main>
++  );
++}
+diff --git a/src/app/login/actions.ts b/src/app/login/actions.ts
+new file mode 100644
+index 0000000..37e0282
+--- /dev/null
++++ b/src/app/login/actions.ts
+@@ -0,0 +1,39 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { createSupabaseServerClient } from "@/lib/supabase/server";
++
++function field(formData: FormData, name: string) {
++  return String(formData.get(name) ?? "").trim();
++}
++
++function loginError(message: string) {
++  return `/login?error=${encodeURIComponent(message)}`;
++}
++
++export async function loginAction(formData: FormData) {
++  const email = field(formData, "email").toLowerCase();
++  const password = field(formData, "password");
++
++  if (!email || !password) {
++    redirect(loginError("Email and password are required."));
++  }
++
++  const supabase = await createSupabaseServerClient();
++  const { error } = await supabase.auth.signInWithPassword({ email, password });
++
++  if (error) {
++    redirect(loginError(error.message));
++  }
++
++  const { data: organizations, error: organizationsError } = await supabase
++    .from("organizations")
++    .select("id")
++    .limit(1);
++
++  if (organizationsError) {
++    redirect(loginError("Signed in, but the business workspace could not be loaded."));
++  }
++
++  redirect(organizations && organizations.length > 0 ? "/dashboard" : "/onboarding");
++}
+diff --git a/src/app/login/page.tsx b/src/app/login/page.tsx
+new file mode 100644
+index 0000000..1a264c2
+--- /dev/null
++++ b/src/app/login/page.tsx
+@@ -0,0 +1,71 @@
++import Link from "next/link";
++import { loginAction } from "./actions";
++
++type SearchParams = Promise<Record<string, string | string[] | undefined>>;
++
++function first(value: string | string[] | undefined) {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++export default async function LoginPage({ searchParams }: { searchParams: SearchParams }) {
++  const params = await searchParams;
++  const error = first(params.error);
++  const message = first(params.message);
++
++  return (
++    <main className="grid min-h-screen place-items-center px-5 py-10">
++      <section className="w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-7 shadow-xl shadow-slate-200/60 sm:p-9">
++        <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-600">Vouxr Business OS</p>
++        <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Sign in</h1>
++        <p className="mt-2 text-sm leading-6 text-slate-600">
++          Access your organization, accounting, inventory, and reports.
++        </p>
++
++        {error ? (
++          <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
++            {error}
++          </div>
++        ) : null}
++
++        {message ? (
++          <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-700">
++            {message}
++          </div>
++        ) : null}
++
++        <form action={loginAction} className="mt-7 space-y-4">
++          <label className="block text-sm font-bold text-slate-700">
++            Email
++            <input
++              name="email"
++              type="email"
++              autoComplete="email"
++              required
++              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++            />
++          </label>
++          <label className="block text-sm font-bold text-slate-700">
++            Password
++            <input
++              name="password"
++              type="password"
++              autoComplete="current-password"
++              required
++              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++            />
++          </label>
++          <button className="w-full rounded-2xl bg-slate-950 px-5 py-3.5 text-sm font-black text-white transition hover:bg-slate-800">
++            Sign in
++          </button>
++        </form>
++
++        <p className="mt-6 text-center text-sm text-slate-600">
++          New to Vouxr?{" "}
++          <Link className="font-black text-sky-700 hover:text-sky-600" href="/signup">
++            Create an account
++          </Link>
++        </p>
++      </section>
++    </main>
++  );
++}
+diff --git a/src/app/onboarding/actions.ts b/src/app/onboarding/actions.ts
+new file mode 100644
+index 0000000..e223b62
+--- /dev/null
++++ b/src/app/onboarding/actions.ts
+@@ -0,0 +1,49 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { requireUser } from "@/lib/auth/require-user";
++
++const inventoryModels = new Set(["RECIPE_AND_STOCK", "DIRECT_INVENTORY"]);
++
++function field(formData: FormData, name: string) {
++  return String(formData.get(name) ?? "").trim();
++}
++
++function onboardingError(message: string) {
++  return `/onboarding?error=${encodeURIComponent(message)}`;
++}
++
++export async function createOrganizationAction(formData: FormData) {
++  const name = field(formData, "name");
++  const slug = field(formData, "slug").toLowerCase();
++  const inventoryModel = field(formData, "inventory_model");
++
++  if (name.length < 2) {
++    redirect(onboardingError("Business name must contain at least 2 characters."));
++  }
++
++  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
++    redirect(onboardingError("Business slug may contain lowercase letters, numbers, and single hyphens."));
++  }
++
++  if (!inventoryModels.has(inventoryModel)) {
++    redirect(onboardingError("Choose a valid inventory model."));
++  }
++
++  const { supabase } = await requireUser();
++  const { error } = await supabase.rpc("create_organization_with_defaults", {
++    p_name: name,
++    p_slug: slug,
++    p_inventory_model: inventoryModel,
++  });
++
++  if (error) {
++    const message =
++      error.code === "23505"
++        ? "That business slug is already in use. Choose another one."
++        : error.message;
++    redirect(onboardingError(message));
++  }
++
++  redirect("/dashboard");
++}
+diff --git a/src/app/onboarding/page.tsx b/src/app/onboarding/page.tsx
+new file mode 100644
+index 0000000..755d1ca
+--- /dev/null
++++ b/src/app/onboarding/page.tsx
+@@ -0,0 +1,117 @@
++import { redirect } from "next/navigation";
++import { Boxes, ChefHat } from "lucide-react";
++import { requireUser } from "@/lib/auth/require-user";
++import { createOrganizationAction } from "./actions";
++
++type SearchParams = Promise<Record<string, string | string[] | undefined>>;
++
++function first(value: string | string[] | undefined) {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++export default async function OnboardingPage({ searchParams }: { searchParams: SearchParams }) {
++  const params = await searchParams;
++  const error = first(params.error);
++  const { supabase } = await requireUser();
++  const { data: existingOrganizations, error: organizationsError } = await supabase
++    .from("organizations")
++    .select("id")
++    .limit(1);
++
++  if (organizationsError) {
++    throw new Error(`Unable to load organizations: ${organizationsError.message}`);
++  }
++
++  if (existingOrganizations && existingOrganizations.length > 0) {
++    redirect("/dashboard");
++  }
++
++  return (
++    <main className="mx-auto min-h-screen max-w-5xl px-5 py-10 sm:px-8">
++      <div className="mx-auto max-w-3xl">
++        <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-600">Business onboarding</p>
++        <h1 className="mt-3 text-4xl font-black tracking-[-0.04em] text-slate-950">
++          Configure how this business tracks stock.
++        </h1>
++        <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600">
++          This choice controls which inventory workflows are enabled. Recipe businesses can still sell
++          direct-stock products.
++        </p>
++
++        {error ? (
++          <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
++            {error}
++          </div>
++        ) : null}
++
++        <form action={createOrganizationAction} className="mt-8 space-y-6">
++          <div className="grid gap-4 sm:grid-cols-2">
++            <label className="block text-sm font-bold text-slate-700">
++              Business name
++              <input
++                name="name"
++                required
++                minLength={2}
++                placeholder="North Street Coffee"
++                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++              />
++            </label>
++            <label className="block text-sm font-bold text-slate-700">
++              Business slug
++              <input
++                name="slug"
++                required
++                pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
++                placeholder="north-street-coffee"
++                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++              />
++              <span className="mt-1 block text-xs font-medium text-slate-400">
++                Lowercase letters, numbers, and hyphens only.
++              </span>
++            </label>
++          </div>
++
++          <fieldset>
++            <legend className="text-sm font-black text-slate-950">Inventory model</legend>
++            <div className="mt-3 grid gap-4 md:grid-cols-2">
++              <label className="cursor-pointer rounded-3xl border border-slate-200 bg-white p-5 shadow-sm has-[:checked]:border-sky-500 has-[:checked]:ring-2 has-[:checked]:ring-sky-100">
++                <input
++                  className="sr-only"
++                  type="radio"
++                  name="inventory_model"
++                  value="RECIPE_AND_STOCK"
++                  defaultChecked
++                />
++                <ChefHat className="h-6 w-6 text-sky-600" />
++                <span className="mt-4 block text-lg font-black text-slate-950">Ingredients / Recipe-Based</span>
++                <span className="mt-2 block text-sm leading-6 text-slate-600">
++                  For cafés, restaurants, bakeries, catering, food stalls, and other businesses where
++                  finished products consume ingredients.
++                </span>
++              </label>
++
++              <label className="cursor-pointer rounded-3xl border border-slate-200 bg-white p-5 shadow-sm has-[:checked]:border-sky-500 has-[:checked]:ring-2 has-[:checked]:ring-sky-100">
++                <input
++                  className="sr-only"
++                  type="radio"
++                  name="inventory_model"
++                  value="DIRECT_INVENTORY"
++                />
++                <Boxes className="h-6 w-6 text-sky-600" />
++                <span className="mt-4 block text-lg font-black text-slate-950">Direct Inventory</span>
++                <span className="mt-2 block text-sm leading-6 text-slate-600">
++                  For retail, convenience stores, clothing, electronics, hardware, resellers, and
++                  general merchandise where products themselves are stocked.
++                </span>
++              </label>
++            </div>
++          </fieldset>
++
++          <button className="w-full rounded-2xl bg-slate-950 px-5 py-4 text-sm font-black text-white transition hover:bg-slate-800 sm:w-auto">
++            Create business workspace
++          </button>
++        </form>
++      </div>
++    </main>
++  );
++}
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index 1b023d7..9eb63d7 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,3 +1,4 @@
++import Link from "next/link";
+ import {
+   Boxes,
+   Calculator,
+@@ -34,8 +35,19 @@ export default function HomePage() {
+           <p className="text-xs font-black uppercase tracking-[0.28em] text-sky-600">Vouxr</p>
+           <h1 className="mt-1 text-lg font-black tracking-tight text-slate-950">Business OS</h1>
+         </div>
+-        <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700">
+-          Foundation v0.1.0
++        <div className="flex items-center gap-2">
++          <Link
++            href="/login"
++            className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50"
++          >
++            Sign in
++          </Link>
++          <Link
++            href="/signup"
++            className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-black text-white hover:bg-slate-800"
++          >
++            Get started
++          </Link>
+         </div>
+       </header>
+ 
+diff --git a/src/app/signup/actions.ts b/src/app/signup/actions.ts
+new file mode 100644
+index 0000000..aa679c0
+--- /dev/null
++++ b/src/app/signup/actions.ts
+@@ -0,0 +1,58 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { createSupabaseServerClient } from "@/lib/supabase/server";
++
++function field(formData: FormData, name: string) {
++  return String(formData.get(name) ?? "").trim();
++}
++
++function signupError(message: string) {
++  return `/signup?error=${encodeURIComponent(message)}`;
++}
++
++export async function signupAction(formData: FormData) {
++  const fullName = field(formData, "full_name");
++  const email = field(formData, "email").toLowerCase();
++  const password = field(formData, "password");
++
++  if (!fullName || !email || !password) {
++    redirect(signupError("Name, email, and password are required."));
++  }
++
++  if (password.length < 8) {
++    redirect(signupError("Use a password with at least 8 characters."));
++  }
++
++  const supabase = await createSupabaseServerClient();
++  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
++  const { data, error } = await supabase.auth.signUp({
++    email,
++    password,
++    options: {
++      data: { full_name: fullName },
++      emailRedirectTo: `${siteUrl}/auth/callback?next=/onboarding`,
++    },
++  });
++
++  if (error) {
++    redirect(signupError(error.message));
++  }
++
++  if (data.session && data.user) {
++    const { error: profileError } = await supabase.from("profiles").upsert({
++      id: data.user.id,
++      full_name: fullName,
++    });
++
++    if (profileError) {
++      redirect(signupError("Account created, but the profile could not be initialized."));
++    }
++
++    redirect("/onboarding");
++  }
++
++  redirect(
++    `/login?message=${encodeURIComponent("Account created. Check your email to confirm your address, then sign in.")}`,
++  );
++}
+diff --git a/src/app/signup/page.tsx b/src/app/signup/page.tsx
+new file mode 100644
+index 0000000..3e8d7ef
+--- /dev/null
++++ b/src/app/signup/page.tsx
+@@ -0,0 +1,74 @@
++import Link from "next/link";
++import { signupAction } from "./actions";
++
++type SearchParams = Promise<Record<string, string | string[] | undefined>>;
++
++function first(value: string | string[] | undefined) {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++export default async function SignupPage({ searchParams }: { searchParams: SearchParams }) {
++  const params = await searchParams;
++  const error = first(params.error);
++
++  return (
++    <main className="grid min-h-screen place-items-center px-5 py-10">
++      <section className="w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-7 shadow-xl shadow-slate-200/60 sm:p-9">
++        <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-600">Vouxr Business OS</p>
++        <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Create your account</h1>
++        <p className="mt-2 text-sm leading-6 text-slate-600">
++          Your first business workspace is created in the next step.
++        </p>
++
++        {error ? (
++          <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
++            {error}
++          </div>
++        ) : null}
++
++        <form action={signupAction} className="mt-7 space-y-4">
++          <label className="block text-sm font-bold text-slate-700">
++            Full name
++            <input
++              name="full_name"
++              autoComplete="name"
++              required
++              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++            />
++          </label>
++          <label className="block text-sm font-bold text-slate-700">
++            Email
++            <input
++              name="email"
++              type="email"
++              autoComplete="email"
++              required
++              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++            />
++          </label>
++          <label className="block text-sm font-bold text-slate-700">
++            Password
++            <input
++              name="password"
++              type="password"
++              minLength={8}
++              autoComplete="new-password"
++              required
++              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none ring-sky-500 transition focus:ring-2"
++            />
++          </label>
++          <button className="w-full rounded-2xl bg-slate-950 px-5 py-3.5 text-sm font-black text-white transition hover:bg-slate-800">
++            Create account
++          </button>
++        </form>
++
++        <p className="mt-6 text-center text-sm text-slate-600">
++          Already have an account?{" "}
++          <Link className="font-black text-sky-700 hover:text-sky-600" href="/login">
++            Sign in
++          </Link>
++        </p>
++      </section>
++    </main>
++  );
++}
+diff --git a/src/lib/auth/require-user.ts b/src/lib/auth/require-user.ts
+new file mode 100644
+index 0000000..b866ad3
+--- /dev/null
++++ b/src/lib/auth/require-user.ts
+@@ -0,0 +1,14 @@
++import { redirect } from "next/navigation";
++import { createSupabaseServerClient } from "@/lib/supabase/server";
++
++export async function requireUser() {
++  const supabase = await createSupabaseServerClient();
++  const { data, error } = await supabase.auth.getClaims();
++  const userId = data?.claims?.sub;
++
++  if (error || !userId) {
++    redirect("/login");
++  }
++
++  return { supabase, userId };
++}
+diff --git a/supabase/migrations/20260922000300_auth_and_onboarding.sql b/supabase/migrations/20260922000300_auth_and_onboarding.sql
+new file mode 100644
+index 0000000..5f04443
+--- /dev/null
++++ b/supabase/migrations/20260922000300_auth_and_onboarding.sql
+@@ -0,0 +1,112 @@
++-- Vouxr Business OS — authentication/onboarding vertical slice
++-- Creates a user's first organization atomically and seeds the V1 chart of accounts.
++
++begin;
++
++create or replace function public.create_organization_with_defaults(
++  p_name text,
++  p_slug text,
++  p_inventory_model public.inventory_model
++)
++returns uuid
++language plpgsql
++security invoker
++set search_path = ''
++as $$
++declare
++  v_user_id uuid := (select auth.uid());
++  v_organization_id uuid;
++  v_name text := trim(p_name);
++  v_slug text := lower(trim(p_slug));
++begin
++  if v_user_id is null then
++    raise exception 'authentication required' using errcode = '42501';
++  end if;
++
++  if length(v_name) < 2 then
++    raise exception 'business name must contain at least 2 characters' using errcode = '22023';
++  end if;
++
++  if v_slug !~ '^[a-z0-9]+(-[a-z0-9]+)*$' then
++    raise exception 'invalid business slug' using errcode = '22023';
++  end if;
++
++  insert into public.profiles (id, full_name)
++  values (
++    v_user_id,
++    nullif((select auth.jwt()) -> 'user_metadata' ->> 'full_name', '')
++  )
++  on conflict (id) do update
++  set full_name = coalesce(public.profiles.full_name, excluded.full_name),
++      updated_at = now();
++
++  insert into public.organizations (
++    owner_user_id,
++    name,
++    slug,
++    inventory_model,
++    currency_code,
++    timezone
++  )
++  values (
++    v_user_id,
++    v_name,
++    v_slug,
++    p_inventory_model,
++    'PHP',
++    'Asia/Manila'
++  )
++  returning id into v_organization_id;
++
++  insert into public.organization_members (organization_id, user_id, role)
++  values (v_organization_id, v_user_id, 'OWNER');
++
++  insert into public.accounts (organization_id, code, name, category)
++  values
++    (v_organization_id, '1000', 'Cash', 'ASSET'),
++    (v_organization_id, '1010', 'Bank', 'ASSET'),
++    (v_organization_id, '1100', 'Accounts Receivable', 'ASSET'),
++    (v_organization_id, '1200', 'Inventory', 'ASSET'),
++    (v_organization_id, '1210', 'Ingredient Inventory', 'ASSET'),
++    (v_organization_id, '1500', 'Equipment', 'ASSET'),
++    (v_organization_id, '2000', 'Accounts Payable', 'LIABILITY'),
++    (v_organization_id, '2100', 'Taxes Payable', 'LIABILITY'),
++    (v_organization_id, '3000', 'Owner''s Equity', 'EQUITY'),
++    (v_organization_id, '4000', 'Sales Revenue', 'REVENUE'),
++    (v_organization_id, '4100', 'Other Income', 'REVENUE'),
++    (v_organization_id, '5000', 'Cost of Goods Sold', 'COGS'),
++    (v_organization_id, '6000', 'Rent', 'EXPENSE'),
++    (v_organization_id, '6010', 'Utilities', 'EXPENSE'),
++    (v_organization_id, '6020', 'Salaries', 'EXPENSE'),
++    (v_organization_id, '6030', 'Marketing', 'EXPENSE'),
++    (v_organization_id, '6040', 'Transportation', 'EXPENSE');
++
++  insert into public.audit_logs (
++    organization_id,
++    actor_user_id,
++    action,
++    entity_type,
++    entity_id,
++    new_value
++  )
++  values (
++    v_organization_id,
++    v_user_id,
++    'ORGANIZATION_CREATED',
++    'organization',
++    v_organization_id,
++    jsonb_build_object(
++      'name', v_name,
++      'slug', v_slug,
++      'inventory_model', p_inventory_model
++    )
++  );
++
++  return v_organization_id;
++end;
++$$;
++
++revoke all on function public.create_organization_with_defaults(text, text, public.inventory_model) from public, anon;
++grant execute on function public.create_organization_with_defaults(text, text, public.inventory_model) to authenticated;
++
++commit;

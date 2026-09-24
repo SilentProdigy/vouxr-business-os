@@ -1,0 +1,1288 @@
+diff --git a/docs/PRODUCTS_STOCKS_LOCAL_TESTING.md b/docs/PRODUCTS_STOCKS_LOCAL_TESTING.md
+new file mode 100644
+index 0000000..d9929f3
+--- /dev/null
++++ b/docs/PRODUCTS_STOCKS_LOCAL_TESTING.md
+@@ -0,0 +1,64 @@
++# Products + Units + Stocks — Local Test Plan
++
++This slice corresponds to Vouxr Business OS v0.3.0: Products + Stocks.
++
++## Apply locally
++
++With local Supabase running:
++
++```bash
++npx supabase db reset --local
++npm run typecheck
++npm run build
++npm run dev
++```
++
++The reset should apply migrations through:
++
++```text
++20260922000400_products_units_stocks.sql
++```
++
++## Recipe + Stock business test
++
++1. Sign in and open `/dashboard/products`.
++2. Add a product category.
++3. Create one `RECIPE` product, one `DIRECT` product, and one `NONE` product.
++4. Confirm the direct product requires a unit and reorder level.
++5. Open `/dashboard/stocks`.
++6. Add a stock category such as `Dairy`.
++7. Add `Full Cream Milk` with base unit `ml`, opening quantity `8000`, and an opening unit cost.
++8. Confirm the displayed current quantity is `8000 ml`.
++9. In local Supabase Studio, verify the quantity came from one immutable `OPENING` row in `stock_movements`.
++10. Edit the stock item's name or reorder level and confirm quantity remains unchanged.
++11. Open `/dashboard/units` and confirm universal volume/weight conversions have numeric factors while package units such as `box` and `pack` show as contextual.
++
++## Direct Inventory business test
++
++1. Reset local Supabase and create a `DIRECT_INVENTORY` organization.
++2. Open `/dashboard/products`.
++3. Confirm the `RECIPE` option is not offered.
++4. Create `DIRECT` and `NONE` products.
++5. Confirm `/dashboard/stocks` redirects back to the dashboard.
++
++## Database invariants to verify
++
++- Product rows contain the current organization's `organization_id`.
++- A direct-inventory organization cannot persist a `RECIPE` product even if a request is forged.
++- Stock item current quantity is derived from `stock_movements`; `stock_items` has no writable current-quantity field.
++- Opening stock is represented by an immutable `OPENING` movement.
++- Volume and weight use deterministic base-unit factors.
++- Contextual count containers are not silently converted to pieces.
++- RLS prevents reads and writes outside the signed-in user's organization.
++
++## Scope intentionally deferred
++
++The following remain for later roadmap slices:
++
++- Recipe versions and recipe deduction engine
++- Direct inventory opening/adjustment UI and valuation engine
++- Purchasing-generated `PURCHASE` movements
++- Waste/adjustment workflows
++- Supplier master records
++- Product variants
++- Item-specific package conversions such as `1 box = 24 pieces`
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 30b9e99..07b476d 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,4 +1,4 @@
+-import { redirect } from "next/navigation";
++import Link from "next/link";
+ import {
+   Boxes,
+   Calculator,
+@@ -7,27 +7,14 @@ import {
+   LogOut,
+   PackageCheck,
+   ReceiptText,
++  Ruler,
+   Store,
+ } from "lucide-react";
+-import { requireUser } from "@/lib/auth/require-user";
++import { requireOrganization } from "@/lib/auth/require-organization";
+ import { signOutAction } from "./actions";
+ 
+ export default async function DashboardPage() {
+-  const { supabase } = await requireUser();
+-  const { data: organization, error: organizationError } = await supabase
+-    .from("organizations")
+-    .select("id,name,slug,inventory_model,currency_code,timezone")
+-    .order("created_at", { ascending: true })
+-    .limit(1)
+-    .maybeSingle();
+-
+-  if (organizationError) {
+-    throw new Error(`Unable to load organization: ${organizationError.message}`);
+-  }
+-
+-  if (!organization) {
+-    redirect("/onboarding");
+-  }
++  const { supabase, organization } = await requireOrganization();
+ 
+   const [productsResult, stocksResult, accountsResult] = await Promise.all([
+     supabase.from("products").select("id", { count: "exact", head: true }).eq("organization_id", organization.id),
+@@ -37,16 +24,17 @@ export default async function DashboardPage() {
+ 
+   const isRecipeBusiness = organization.inventory_model === "RECIPE_AND_STOCK";
+   const modules = [
+-    { name: "Sales", detail: "POS, invoices, credit sales and payments", icon: ReceiptText },
+-    { name: "Products", detail: `${productsResult.count ?? 0} products configured`, icon: Store },
+-    { name: "Inventory", detail: "Direct-stock movements and valuation", icon: Boxes },
++    { name: "Sales", detail: "POS, invoices, credit sales and payments", icon: ReceiptText, href: null },
++    { name: "Products", detail: `${productsResult.count ?? 0} products configured`, icon: Store, href: "/dashboard/products" },
++    { name: "Inventory", detail: "Direct-stock movements and valuation", icon: Boxes, href: null },
+     ...(isRecipeBusiness
+       ? [
+-          { name: "Stocks", detail: `${stocksResult.count ?? 0} ingredient items configured`, icon: PackageCheck },
+-          { name: "Recipes", detail: "Recipe versions, costing and availability", icon: ChefHat },
++          { name: "Stocks", detail: `${stocksResult.count ?? 0} ingredient items configured`, icon: PackageCheck, href: "/dashboard/stocks" },
++          { name: "Recipes", detail: "Recipe versions, costing and availability", icon: ChefHat, href: null },
+         ]
+       : []),
+-    { name: "Accounting", detail: `${accountsResult.count ?? 0} chart-of-accounts entries`, icon: Calculator },
++    { name: "Units", detail: "Canonical volume, weight and count units", icon: Ruler, href: "/dashboard/units" },
++    { name: "Accounting", detail: `${accountsResult.count ?? 0} chart-of-accounts entries`, icon: Calculator, href: null },
+   ];
+ 
+   return (
+@@ -72,8 +60,8 @@ export default async function DashboardPage() {
+         <article className="rounded-3xl bg-slate-950 p-6 text-white">
+           <CircleDollarSign className="h-6 w-6 text-sky-300" />
+           <p className="mt-5 text-xs font-black uppercase tracking-[0.2em] text-slate-400">Foundation</p>
+-          <p className="mt-2 text-2xl font-black">Ready for transactions</p>
+-          <p className="mt-2 text-sm leading-6 text-slate-300">Organization, roles, chart of accounts, and RLS are initialized.</p>
++          <p className="mt-2 text-2xl font-black">Ready for catalog setup</p>
++          <p className="mt-2 text-sm leading-6 text-slate-300">Organization, roles, products, units, stocks, chart of accounts, and RLS are available locally.</p>
+         </article>
+         <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+           <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">Business slug</p>
+@@ -90,15 +78,22 @@ export default async function DashboardPage() {
+         <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-600">Workspace</p>
+         <h2 className="mt-2 text-3xl font-black tracking-tight text-slate-950">Modules</h2>
+         <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+-          {modules.map(({ name, detail, icon: Icon }) => (
+-            <article key={name} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+-              <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100">
+-                <Icon className="h-5 w-5 text-slate-700" />
+-              </div>
+-              <h3 className="mt-5 text-lg font-black text-slate-950">{name}</h3>
+-              <p className="mt-2 text-sm leading-6 text-slate-600">{detail}</p>
+-            </article>
+-          ))}
++          {modules.map(({ name, detail, icon: Icon, href }) => {
++            const content = (
++              <>
++                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100"><Icon className="h-5 w-5 text-slate-700" /></div>
++                <h3 className="mt-5 text-lg font-black text-slate-950">{name}</h3>
++                <p className="mt-2 text-sm leading-6 text-slate-600">{detail}</p>
++                <p className="mt-4 text-xs font-black uppercase tracking-wide text-slate-400">{href ? "Open module" : "Coming next"}</p>
++              </>
++            );
++
++            return href ? (
++              <Link key={name} href={href} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">{content}</Link>
++            ) : (
++              <article key={name} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm opacity-75">{content}</article>
++            );
++          })}
+         </div>
+       </section>
+     </main>
+diff --git a/src/app/dashboard/products/actions.ts b/src/app/dashboard/products/actions.ts
+new file mode 100644
+index 0000000..62ef000
+--- /dev/null
++++ b/src/app/dashboard/products/actions.ts
+@@ -0,0 +1,181 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { requireOrganization } from "@/lib/auth/require-organization";
++
++const productStatuses = new Set(["ACTIVE", "INACTIVE", "ARCHIVED"]);
++const trackingMethods = new Set(["RECIPE", "DIRECT", "NONE"]);
++const inventoryRoles = new Set(["OWNER", "ADMIN", "INVENTORY_STAFF"]);
++
++function field(formData: FormData, name: string) {
++  return String(formData.get(name) ?? "").trim();
++}
++
++function optionalField(formData: FormData, name: string) {
++  const value = field(formData, name);
++  return value.length > 0 ? value : null;
++}
++
++function numberField(formData: FormData, name: string, fallback = 0) {
++  const raw = field(formData, name);
++  if (!raw) return fallback;
++  const value = Number(raw);
++  return Number.isFinite(value) ? value : Number.NaN;
++}
++
++function productsUrl(type: "error" | "message", message: string) {
++  return `/dashboard/products?${type}=${encodeURIComponent(message)}`;
++}
++
++function assertInventoryRole(role: string) {
++  if (!inventoryRoles.has(role)) {
++    redirect(productsUrl("error", "You do not have permission to change products."));
++  }
++}
++
++export async function createCategoryAction(formData: FormData) {
++  const name = field(formData, "name");
++  const { supabase, organization, role } = await requireOrganization();
++  assertInventoryRole(role);
++
++  if (!name) {
++    redirect(productsUrl("error", "Category name is required."));
++  }
++
++  const { error } = await supabase.from("categories").insert({
++    organization_id: organization.id,
++    name,
++  });
++
++  if (error) {
++    redirect(productsUrl("error", error.code === "23505" ? "That category already exists." : error.message));
++  }
++
++  redirect(productsUrl("message", "Product category created."));
++}
++
++export async function createProductAction(formData: FormData) {
++  const { supabase, organization, userId, role } = await requireOrganization();
++  assertInventoryRole(role);
++
++  const name = field(formData, "name");
++  const sku = optionalField(formData, "sku");
++  const barcode = optionalField(formData, "barcode");
++  const categoryId = optionalField(formData, "category_id");
++  const description = optionalField(formData, "description");
++  const sellingPrice = numberField(formData, "selling_price");
++  const taxPercent = numberField(formData, "tax_percent");
++  const trackingMethod = field(formData, "tracking_method");
++  const status = field(formData, "status") || "ACTIVE";
++  const directUnitCode = optionalField(formData, "direct_unit_code");
++  const reorderLevel = numberField(formData, "reorder_level");
++
++  if (!name) redirect(productsUrl("error", "Product name is required."));
++  if (!Number.isFinite(sellingPrice) || sellingPrice < 0) redirect(productsUrl("error", "Selling price must be zero or greater."));
++  if (!Number.isFinite(taxPercent) || taxPercent < 0) redirect(productsUrl("error", "Tax rate must be zero or greater."));
++  if (!trackingMethods.has(trackingMethod)) redirect(productsUrl("error", "Choose a valid tracking method."));
++  if (!productStatuses.has(status)) redirect(productsUrl("error", "Choose a valid product status."));
++
++  if (organization.inventory_model === "DIRECT_INVENTORY" && trackingMethod === "RECIPE") {
++    redirect(productsUrl("error", "Recipe products are not available for a direct-inventory business."));
++  }
++
++  if (trackingMethod === "DIRECT") {
++    if (!directUnitCode) redirect(productsUrl("error", "Direct products require a unit."));
++    if (!Number.isFinite(reorderLevel) || reorderLevel < 0) redirect(productsUrl("error", "Reorder level must be zero or greater."));
++  }
++
++  const { data, error } = await supabase
++    .from("products")
++    .insert({
++      organization_id: organization.id,
++      category_id: categoryId,
++      name,
++      sku,
++      barcode,
++      description,
++      selling_price: sellingPrice,
++      tax_rate: taxPercent / 100,
++      status,
++      tracking_method: trackingMethod,
++      direct_unit_code: trackingMethod === "DIRECT" ? directUnitCode : null,
++      reorder_level: trackingMethod === "DIRECT" ? reorderLevel : null,
++    })
++    .select("id")
++    .single();
++
++  if (error) {
++    redirect(productsUrl("error", error.code === "23505" ? "SKU or barcode already exists for this business." : error.message));
++  }
++
++  await supabase.from("audit_logs").insert({
++    organization_id: organization.id,
++    actor_user_id: userId,
++    action: "PRODUCT_CREATED",
++    entity_type: "product",
++    entity_id: data.id,
++    new_value: { name, sku, barcode, tracking_method: trackingMethod },
++  });
++
++  redirect(productsUrl("message", "Product created."));
++}
++
++export async function updateProductAction(formData: FormData) {
++  const { supabase, organization, userId, role } = await requireOrganization();
++  assertInventoryRole(role);
++
++  const id = field(formData, "id");
++  const name = field(formData, "name");
++  const sku = optionalField(formData, "sku");
++  const barcode = optionalField(formData, "barcode");
++  const categoryId = optionalField(formData, "category_id");
++  const description = optionalField(formData, "description");
++  const sellingPrice = numberField(formData, "selling_price");
++  const taxPercent = numberField(formData, "tax_percent");
++  const trackingMethod = field(formData, "tracking_method");
++  const status = field(formData, "status");
++  const directUnitCode = optionalField(formData, "direct_unit_code");
++  const reorderLevel = numberField(formData, "reorder_level");
++
++  if (!id || !name) redirect(productsUrl("error", "Product id and name are required."));
++  if (!Number.isFinite(sellingPrice) || sellingPrice < 0) redirect(productsUrl("error", "Selling price must be zero or greater."));
++  if (!Number.isFinite(taxPercent) || taxPercent < 0) redirect(productsUrl("error", "Tax rate must be zero or greater."));
++  if (!trackingMethods.has(trackingMethod) || !productStatuses.has(status)) redirect(productsUrl("error", "Invalid product configuration."));
++  if (organization.inventory_model === "DIRECT_INVENTORY" && trackingMethod === "RECIPE") {
++    redirect(productsUrl("error", "Recipe products are not available for a direct-inventory business."));
++  }
++  if (trackingMethod === "DIRECT" && (!directUnitCode || !Number.isFinite(reorderLevel) || reorderLevel < 0)) {
++    redirect(productsUrl("error", "Direct products require a unit and a non-negative reorder level."));
++  }
++
++  const { error } = await supabase
++    .from("products")
++    .update({
++      category_id: categoryId,
++      name,
++      sku,
++      barcode,
++      description,
++      selling_price: sellingPrice,
++      tax_rate: taxPercent / 100,
++      status,
++      tracking_method: trackingMethod,
++      direct_unit_code: trackingMethod === "DIRECT" ? directUnitCode : null,
++      reorder_level: trackingMethod === "DIRECT" ? reorderLevel : null,
++    })
++    .eq("organization_id", organization.id)
++    .eq("id", id);
++
++  if (error) redirect(productsUrl("error", error.message));
++
++  await supabase.from("audit_logs").insert({
++    organization_id: organization.id,
++    actor_user_id: userId,
++    action: "PRODUCT_UPDATED",
++    entity_type: "product",
++    entity_id: id,
++    new_value: { name, sku, barcode, status, tracking_method: trackingMethod },
++  });
++
++  redirect(productsUrl("message", "Product updated."));
++}
+diff --git a/src/app/dashboard/products/page.tsx b/src/app/dashboard/products/page.tsx
+new file mode 100644
+index 0000000..f89301c
+--- /dev/null
++++ b/src/app/dashboard/products/page.tsx
+@@ -0,0 +1,150 @@
++import Link from "next/link";
++import { ArrowLeft, Boxes, Plus, Tags } from "lucide-react";
++import { requireOrganization } from "@/lib/auth/require-organization";
++import { createCategoryAction, createProductAction, updateProductAction } from "./actions";
++
++type SearchParams = Promise<Record<string, string | string[] | undefined>>;
++
++function first(value: string | string[] | undefined) {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++function money(value: number | string | null | undefined) {
++  return new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(Number(value ?? 0));
++}
++
++export default async function ProductsPage({ searchParams }: { searchParams: SearchParams }) {
++  const params = await searchParams;
++  const error = first(params.error);
++  const message = first(params.message);
++  const { supabase, organization, role } = await requireOrganization();
++
++  const [productsResult, categoriesResult, unitsResult] = await Promise.all([
++    supabase
++      .from("product_inventory_balances")
++      .select("*")
++      .eq("organization_id", organization.id)
++      .order("name"),
++    supabase.from("categories").select("id,name").eq("organization_id", organization.id).order("name"),
++    supabase.from("units").select("code,name,dimension,factor_to_base,base_code").order("dimension").order("name"),
++  ]);
++
++  if (productsResult.error) throw new Error(productsResult.error.message);
++  if (categoriesResult.error) throw new Error(categoriesResult.error.message);
++  if (unitsResult.error) throw new Error(unitsResult.error.message);
++
++  const products = productsResult.data ?? [];
++  const categories = categoriesResult.data ?? [];
++  const units = unitsResult.data ?? [];
++  const canManage = ["OWNER", "ADMIN", "INVENTORY_STAFF"].includes(role);
++  const recipeAllowed = organization.inventory_model === "RECIPE_AND_STOCK";
++
++  return (
++    <main className="mx-auto min-h-screen max-w-7xl px-5 py-8 sm:px-8 lg:px-10">
++      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
++        <div>
++          <Link href="/dashboard" className="inline-flex items-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-900">
++            <ArrowLeft className="h-4 w-4" /> Dashboard
++          </Link>
++          <p className="mt-5 text-xs font-black uppercase tracking-[0.22em] text-sky-600">Catalog</p>
++          <h1 className="mt-2 text-4xl font-black tracking-tight text-slate-950">Products</h1>
++          <p className="mt-2 text-sm text-slate-600">Recipe, direct-stock, and non-stock/service products.</p>
++        </div>
++        <Link href="/dashboard/units" className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-black text-slate-700 shadow-sm hover:bg-slate-50">
++          Unit reference
++        </Link>
++      </div>
++
++      {error ? <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
++      {message ? <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-700">{message}</div> : null}
++
++      {canManage ? (
++        <section className="mt-7 grid gap-4 lg:grid-cols-[0.65fr_1.35fr]">
++          <form action={createCategoryAction} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="flex items-center gap-2">
++              <Tags className="h-5 w-5 text-sky-600" />
++              <h2 className="font-black text-slate-950">New category</h2>
++            </div>
++            <input name="name" required placeholder="Beverages" className="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3" />
++            <button className="mt-3 w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white">Add category</button>
++          </form>
++
++          <form action={createProductAction} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="flex items-center gap-2">
++              <Plus className="h-5 w-5 text-sky-600" />
++              <h2 className="font-black text-slate-950">New product</h2>
++            </div>
++            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++              <input name="name" required placeholder="Product name" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="sku" placeholder="SKU" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="barcode" placeholder="Barcode" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <select name="category_id" className="rounded-2xl border border-slate-200 px-4 py-3">
++                <option value="">No category</option>
++                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
++              </select>
++              <input name="selling_price" required min="0" step="0.01" type="number" placeholder="Selling price" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="tax_percent" min="0" step="0.01" type="number" defaultValue="0" placeholder="Tax %" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <select name="tracking_method" defaultValue={recipeAllowed ? "RECIPE" : "DIRECT"} className="rounded-2xl border border-slate-200 px-4 py-3">
++                {recipeAllowed ? <option value="RECIPE">Recipe</option> : null}
++                <option value="DIRECT">Direct inventory</option>
++                <option value="NONE">No stock / service</option>
++              </select>
++              <select name="direct_unit_code" className="rounded-2xl border border-slate-200 px-4 py-3">
++                <option value="">Direct unit (DIRECT only)</option>
++                {units.map((unit) => <option key={unit.code} value={unit.code}>{unit.name} ({unit.code})</option>)}
++              </select>
++              <input name="reorder_level" min="0" step="0.000001" type="number" defaultValue="0" placeholder="Reorder level (DIRECT)" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <select name="status" defaultValue="ACTIVE" className="rounded-2xl border border-slate-200 px-4 py-3">
++                <option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option><option value="ARCHIVED">Archived</option>
++              </select>
++              <textarea name="description" placeholder="Description" className="min-h-12 rounded-2xl border border-slate-200 px-4 py-3 sm:col-span-2" />
++            </div>
++            <p className="mt-3 text-xs font-medium text-slate-500">Unit and reorder level are used only when tracking method is DIRECT.</p>
++            <button className="mt-4 rounded-2xl bg-slate-950 px-5 py-3 text-sm font-black text-white">Create product</button>
++          </form>
++        </section>
++      ) : null}
++
++      <section className="mt-8">
++        <div className="flex items-center gap-2">
++          <Boxes className="h-5 w-5 text-sky-600" />
++          <h2 className="text-xl font-black text-slate-950">Catalog ({products.length})</h2>
++        </div>
++        <div className="mt-4 space-y-3">
++          {products.length === 0 ? (
++            <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm font-semibold text-slate-500">No products yet.</div>
++          ) : products.map((product) => (
++            <details key={product.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++              <summary className="cursor-pointer list-none">
++                <div className="grid gap-3 sm:grid-cols-[1.3fr_0.7fr_0.7fr_0.6fr] sm:items-center">
++                  <div><p className="font-black text-slate-950">{product.name}</p><p className="text-xs font-semibold text-slate-500">{product.sku || "No SKU"} · {product.tracking_method}</p></div>
++                  <div><p className="text-xs font-black uppercase tracking-wide text-slate-400">Price</p><p className="mt-1 font-black">{money(product.selling_price)}</p></div>
++                  <div><p className="text-xs font-black uppercase tracking-wide text-slate-400">On hand</p><p className="mt-1 font-black">{Number(product.current_quantity ?? 0).toLocaleString()}</p></div>
++                  <div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-700">{product.status}</span></div>
++                </div>
++              </summary>
++
++              {canManage ? (
++                <form action={updateProductAction} className="mt-5 grid gap-3 border-t border-slate-100 pt-5 sm:grid-cols-2 lg:grid-cols-4">
++                  <input type="hidden" name="id" value={product.id} />
++                  <input name="name" required defaultValue={product.name} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <input name="sku" defaultValue={product.sku ?? ""} placeholder="SKU" className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <input name="barcode" defaultValue={product.barcode ?? ""} placeholder="Barcode" className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <select name="category_id" defaultValue={product.category_id ?? ""} className="rounded-2xl border border-slate-200 px-4 py-3"><option value="">No category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
++                  <input name="selling_price" min="0" step="0.01" type="number" required defaultValue={Number(product.selling_price)} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <input name="tax_percent" min="0" step="0.01" type="number" defaultValue={Number(product.tax_rate ?? 0) * 100} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <select name="tracking_method" defaultValue={product.tracking_method} className="rounded-2xl border border-slate-200 px-4 py-3">{recipeAllowed ? <option value="RECIPE">Recipe</option> : null}<option value="DIRECT">Direct inventory</option><option value="NONE">No stock / service</option></select>
++                  <select name="direct_unit_code" defaultValue={product.direct_unit_code ?? ""} className="rounded-2xl border border-slate-200 px-4 py-3"><option value="">Direct unit (DIRECT only)</option>{units.map((unit) => <option key={unit.code} value={unit.code}>{unit.name} ({unit.code})</option>)}</select>
++                  <input name="reorder_level" min="0" step="0.000001" type="number" defaultValue={Number(product.reorder_level ?? 0)} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                  <select name="status" defaultValue={product.status} className="rounded-2xl border border-slate-200 px-4 py-3"><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option><option value="ARCHIVED">Archived</option></select>
++                  <textarea name="description" defaultValue={product.description ?? ""} className="rounded-2xl border border-slate-200 px-4 py-3 sm:col-span-2" />
++                  <button className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white">Save product</button>
++                </form>
++              ) : null}
++            </details>
++          ))}
++        </div>
++      </section>
++    </main>
++  );
++}
+diff --git a/src/app/dashboard/stocks/actions.ts b/src/app/dashboard/stocks/actions.ts
+new file mode 100644
+index 0000000..03054bb
+--- /dev/null
++++ b/src/app/dashboard/stocks/actions.ts
+@@ -0,0 +1,143 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { requireOrganization } from "@/lib/auth/require-organization";
++
++const inventoryRoles = new Set(["OWNER", "ADMIN", "INVENTORY_STAFF"]);
++const statuses = new Set(["ACTIVE", "INACTIVE", "ARCHIVED"]);
++
++function field(formData: FormData, name: string) {
++  return String(formData.get(name) ?? "").trim();
++}
++
++function optionalField(formData: FormData, name: string) {
++  const value = field(formData, name);
++  return value.length > 0 ? value : null;
++}
++
++function numberField(formData: FormData, name: string, fallback = 0) {
++  const raw = field(formData, name);
++  if (!raw) return fallback;
++  const value = Number(raw);
++  return Number.isFinite(value) ? value : Number.NaN;
++}
++
++function stocksUrl(type: "error" | "message", message: string) {
++  return `/dashboard/stocks?${type}=${encodeURIComponent(message)}`;
++}
++
++function assertCanManage(role: string, inventoryModel: string) {
++  if (inventoryModel !== "RECIPE_AND_STOCK") {
++    redirect("/dashboard");
++  }
++  if (!inventoryRoles.has(role)) {
++    redirect(stocksUrl("error", "You do not have permission to change ingredient stocks."));
++  }
++}
++
++export async function createStockCategoryAction(formData: FormData) {
++  const name = field(formData, "name");
++  const { supabase, organization, role } = await requireOrganization();
++  assertCanManage(role, organization.inventory_model);
++
++  if (!name) redirect(stocksUrl("error", "Stock category name is required."));
++
++  const { error } = await supabase.from("stock_categories").insert({
++    organization_id: organization.id,
++    name,
++  });
++
++  if (error) {
++    redirect(stocksUrl("error", error.code === "23505" ? "That stock category already exists." : error.message));
++  }
++
++  redirect(stocksUrl("message", "Stock category created."));
++}
++
++export async function createStockItemAction(formData: FormData) {
++  const { supabase, organization, role } = await requireOrganization();
++  assertCanManage(role, organization.inventory_model);
++
++  const name = field(formData, "name");
++  const sku = optionalField(formData, "sku");
++  const stockCategoryId = optionalField(formData, "stock_category_id");
++  const baseUnitCode = field(formData, "base_unit_code");
++  const reorderLevel = numberField(formData, "reorder_level");
++  const preferredSupplierName = optionalField(formData, "preferred_supplier_name");
++  const status = field(formData, "status") || "ACTIVE";
++  const openingQuantity = numberField(formData, "opening_quantity");
++  const openingUnitCostRaw = field(formData, "opening_unit_cost");
++  const openingUnitCost = openingUnitCostRaw ? Number(openingUnitCostRaw) : null;
++
++  if (!name || !baseUnitCode) redirect(stocksUrl("error", "Name and base unit are required."));
++  if (!statuses.has(status)) redirect(stocksUrl("error", "Choose a valid stock status."));
++  if (!Number.isFinite(reorderLevel) || reorderLevel < 0) redirect(stocksUrl("error", "Reorder level must be zero or greater."));
++  if (!Number.isFinite(openingQuantity) || openingQuantity < 0) redirect(stocksUrl("error", "Opening quantity cannot be negative."));
++  if (openingUnitCost !== null && (!Number.isFinite(openingUnitCost) || openingUnitCost < 0)) {
++    redirect(stocksUrl("error", "Opening unit cost cannot be negative."));
++  }
++
++  const { error } = await supabase.rpc("create_stock_item_with_opening_balance", {
++    p_organization_id: organization.id,
++    p_name: name,
++    p_sku: sku,
++    p_stock_category_id: stockCategoryId,
++    p_base_unit_code: baseUnitCode,
++    p_reorder_level: reorderLevel,
++    p_preferred_supplier_name: preferredSupplierName,
++    p_status: status,
++    p_opening_quantity: openingQuantity,
++    p_opening_unit_cost: openingUnitCost,
++  });
++
++  if (error) {
++    redirect(stocksUrl("error", error.code === "23505" ? "That stock SKU already exists for this business." : error.message));
++  }
++
++  redirect(stocksUrl("message", "Stock item created with its opening balance."));
++}
++
++export async function updateStockItemAction(formData: FormData) {
++  const { supabase, organization, userId, role } = await requireOrganization();
++  assertCanManage(role, organization.inventory_model);
++
++  const id = field(formData, "id");
++  const name = field(formData, "name");
++  const sku = optionalField(formData, "sku");
++  const stockCategoryId = optionalField(formData, "stock_category_id");
++  const baseUnitCode = field(formData, "base_unit_code");
++  const reorderLevel = numberField(formData, "reorder_level");
++  const preferredSupplierName = optionalField(formData, "preferred_supplier_name");
++  const status = field(formData, "status");
++
++  if (!id || !name || !baseUnitCode) redirect(stocksUrl("error", "Stock item id, name, and base unit are required."));
++  if (!statuses.has(status)) redirect(stocksUrl("error", "Choose a valid stock status."));
++  if (!Number.isFinite(reorderLevel) || reorderLevel < 0) redirect(stocksUrl("error", "Reorder level must be zero or greater."));
++
++  const { error } = await supabase
++    .from("stock_items")
++    .update({
++      stock_category_id: stockCategoryId,
++      name,
++      sku,
++      base_unit_code: baseUnitCode,
++      reorder_level: reorderLevel,
++      preferred_supplier_name: preferredSupplierName,
++      status,
++    })
++    .eq("organization_id", organization.id)
++    .eq("id", id);
++
++  if (error) redirect(stocksUrl("error", error.message));
++
++  await supabase.from("audit_logs").insert({
++    organization_id: organization.id,
++    actor_user_id: userId,
++    action: "STOCK_ITEM_UPDATED",
++    entity_type: "stock_item",
++    entity_id: id,
++    new_value: { name, sku, base_unit_code: baseUnitCode, reorder_level: reorderLevel, status },
++  });
++
++  redirect(stocksUrl("message", "Stock item updated. Quantity was not overwritten."));
++}
+diff --git a/src/app/dashboard/stocks/page.tsx b/src/app/dashboard/stocks/page.tsx
+new file mode 100644
+index 0000000..50d0c07
+--- /dev/null
++++ b/src/app/dashboard/stocks/page.tsx
+@@ -0,0 +1,125 @@
++import Link from "next/link";
++import { ArrowLeft, PackageOpen, Plus, Tags } from "lucide-react";
++import { redirect } from "next/navigation";
++import { requireOrganization } from "@/lib/auth/require-organization";
++import { createStockCategoryAction, createStockItemAction, updateStockItemAction } from "./actions";
++
++type SearchParams = Promise<Record<string, string | string[] | undefined>>;
++
++function first(value: string | string[] | undefined) {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++function money(value: number | string | null | undefined) {
++  return new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(Number(value ?? 0));
++}
++
++function quantity(value: number | string | null | undefined) {
++  return Number(value ?? 0).toLocaleString("en-PH", { maximumFractionDigits: 6 });
++}
++
++export default async function StocksPage({ searchParams }: { searchParams: SearchParams }) {
++  const params = await searchParams;
++  const error = first(params.error);
++  const message = first(params.message);
++  const { supabase, organization, role } = await requireOrganization();
++
++  if (organization.inventory_model !== "RECIPE_AND_STOCK") {
++    redirect("/dashboard");
++  }
++
++  const [stocksResult, categoriesResult, unitsResult] = await Promise.all([
++    supabase.from("stock_item_balances").select("*").eq("organization_id", organization.id).order("name"),
++    supabase.from("stock_categories").select("id,name").eq("organization_id", organization.id).order("name"),
++    supabase.from("units").select("code,name,dimension,factor_to_base,base_code").order("dimension").order("name"),
++  ]);
++
++  if (stocksResult.error) throw new Error(stocksResult.error.message);
++  if (categoriesResult.error) throw new Error(categoriesResult.error.message);
++  if (unitsResult.error) throw new Error(unitsResult.error.message);
++
++  const stocks = stocksResult.data ?? [];
++  const categories = categoriesResult.data ?? [];
++  const units = unitsResult.data ?? [];
++  const canManage = ["OWNER", "ADMIN", "INVENTORY_STAFF"].includes(role);
++
++  return (
++    <main className="mx-auto min-h-screen max-w-7xl px-5 py-8 sm:px-8 lg:px-10">
++      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
++        <div>
++          <Link href="/dashboard" className="inline-flex items-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-900"><ArrowLeft className="h-4 w-4" /> Dashboard</Link>
++          <p className="mt-5 text-xs font-black uppercase tracking-[0.22em] text-sky-600">Ingredients / raw materials</p>
++          <h1 className="mt-2 text-4xl font-black tracking-tight text-slate-950">Stocks Management</h1>
++          <p className="mt-2 text-sm text-slate-600">Current quantity is calculated from immutable stock movements, never overwritten.</p>
++        </div>
++        <Link href="/dashboard/units" className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-black text-slate-700 shadow-sm hover:bg-slate-50">Unit reference</Link>
++      </div>
++
++      {error ? <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
++      {message ? <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-700">{message}</div> : null}
++
++      {canManage ? (
++        <section className="mt-7 grid gap-4 lg:grid-cols-[0.65fr_1.35fr]">
++          <form action={createStockCategoryAction} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="flex items-center gap-2"><Tags className="h-5 w-5 text-sky-600" /><h2 className="font-black text-slate-950">New stock category</h2></div>
++            <input name="name" required placeholder="Dairy" className="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3" />
++            <button className="mt-3 w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white">Add category</button>
++          </form>
++
++          <form action={createStockItemAction} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="flex items-center gap-2"><Plus className="h-5 w-5 text-sky-600" /><h2 className="font-black text-slate-950">New stock item</h2></div>
++            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++              <input name="name" required placeholder="Full Cream Milk" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="sku" placeholder="SKU" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <select name="stock_category_id" className="rounded-2xl border border-slate-200 px-4 py-3"><option value="">No category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
++              <select name="base_unit_code" required defaultValue="ml" className="rounded-2xl border border-slate-200 px-4 py-3">{units.map((unit) => <option key={unit.code} value={unit.code}>{unit.name} ({unit.code})</option>)}</select>
++              <input name="reorder_level" min="0" step="0.000001" type="number" defaultValue="0" placeholder="Reorder level" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="preferred_supplier_name" placeholder="Preferred supplier (optional)" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="opening_quantity" min="0" step="0.000001" type="number" defaultValue="0" placeholder="Opening quantity" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <input name="opening_unit_cost" min="0" step="0.000001" type="number" placeholder="Opening unit cost" className="rounded-2xl border border-slate-200 px-4 py-3" />
++              <select name="status" defaultValue="ACTIVE" className="rounded-2xl border border-slate-200 px-4 py-3"><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option><option value="ARCHIVED">Archived</option></select>
++            </div>
++            <p className="mt-3 text-xs font-medium text-slate-500">Opening quantity creates an immutable OPENING movement. Later edits never overwrite quantity.</p>
++            <button className="mt-4 rounded-2xl bg-slate-950 px-5 py-3 text-sm font-black text-white">Create stock item</button>
++          </form>
++        </section>
++      ) : null}
++
++      <section className="mt-8">
++        <div className="flex items-center gap-2"><PackageOpen className="h-5 w-5 text-sky-600" /><h2 className="text-xl font-black text-slate-950">Stock items ({stocks.length})</h2></div>
++        <div className="mt-4 space-y-3">
++          {stocks.length === 0 ? <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm font-semibold text-slate-500">No ingredient stocks yet.</div> : stocks.map((stock) => {
++            const isLow = Number(stock.current_quantity ?? 0) <= Number(stock.reorder_level ?? 0);
++            return (
++              <details key={stock.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
++                <summary className="cursor-pointer list-none">
++                  <div className="grid gap-3 sm:grid-cols-[1.2fr_0.65fr_0.65fr_0.65fr_0.55fr] sm:items-center">
++                    <div><p className="font-black text-slate-950">{stock.name}</p><p className="text-xs font-semibold text-slate-500">{stock.sku || "No SKU"} · base {stock.base_unit_code}</p></div>
++                    <div><p className="text-xs font-black uppercase tracking-wide text-slate-400">On hand</p><p className="mt-1 font-black">{quantity(stock.current_quantity)} {stock.base_unit_code}</p></div>
++                    <div><p className="text-xs font-black uppercase tracking-wide text-slate-400">Avg cost</p><p className="mt-1 font-black">{money(stock.average_cost)}</p></div>
++                    <div><p className="text-xs font-black uppercase tracking-wide text-slate-400">Value</p><p className="mt-1 font-black">{money(stock.stock_value)}</p></div>
++                    <div><span className={`rounded-full px-3 py-1 text-xs font-black ${isLow ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>{isLow ? "LOW" : stock.status}</span></div>
++                  </div>
++                </summary>
++
++                {canManage ? (
++                  <form action={updateStockItemAction} className="mt-5 grid gap-3 border-t border-slate-100 pt-5 sm:grid-cols-2 lg:grid-cols-4">
++                    <input type="hidden" name="id" value={stock.id} />
++                    <input name="name" required defaultValue={stock.name} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                    <input name="sku" defaultValue={stock.sku ?? ""} placeholder="SKU" className="rounded-2xl border border-slate-200 px-4 py-3" />
++                    <select name="stock_category_id" defaultValue={stock.stock_category_id ?? ""} className="rounded-2xl border border-slate-200 px-4 py-3"><option value="">No category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
++                    <select name="base_unit_code" defaultValue={stock.base_unit_code} className="rounded-2xl border border-slate-200 px-4 py-3">{units.map((unit) => <option key={unit.code} value={unit.code}>{unit.name} ({unit.code})</option>)}</select>
++                    <input name="reorder_level" min="0" step="0.000001" type="number" defaultValue={Number(stock.reorder_level ?? 0)} className="rounded-2xl border border-slate-200 px-4 py-3" />
++                    <input name="preferred_supplier_name" defaultValue={stock.preferred_supplier_name ?? ""} placeholder="Preferred supplier" className="rounded-2xl border border-slate-200 px-4 py-3" />
++                    <select name="status" defaultValue={stock.status} className="rounded-2xl border border-slate-200 px-4 py-3"><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option><option value="ARCHIVED">Archived</option></select>
++                    <button className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white">Save stock item</button>
++                  </form>
++                ) : null}
++              </details>
++            );
++          })}
++        </div>
++      </section>
++    </main>
++  );
++}
+diff --git a/src/app/dashboard/units/page.tsx b/src/app/dashboard/units/page.tsx
+new file mode 100644
+index 0000000..d82a800
+--- /dev/null
++++ b/src/app/dashboard/units/page.tsx
+@@ -0,0 +1,44 @@
++import Link from "next/link";
++import { ArrowLeft, Ruler } from "lucide-react";
++import { requireOrganization } from "@/lib/auth/require-organization";
++
++export default async function UnitsPage() {
++  const { supabase } = await requireOrganization();
++  const { data: units, error } = await supabase
++    .from("units")
++    .select("code,name,dimension,factor_to_base,base_code")
++    .order("dimension")
++    .order("name");
++
++  if (error) throw new Error(error.message);
++
++  return (
++    <main className="mx-auto min-h-screen max-w-5xl px-5 py-8 sm:px-8">
++      <Link href="/dashboard" className="inline-flex items-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-900"><ArrowLeft className="h-4 w-4" /> Dashboard</Link>
++      <div className="mt-5 flex items-start gap-3">
++        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-sky-100"><Ruler className="h-6 w-6 text-sky-700" /></div>
++        <div>
++          <p className="text-xs font-black uppercase tracking-[0.22em] text-sky-600">Conversion engine</p>
++          <h1 className="mt-1 text-4xl font-black tracking-tight text-slate-950">Units</h1>
++          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">Volume converts through ml; weight converts through g. Container count units are contextual and are not silently treated as equivalent to pieces.</p>
++        </div>
++      </div>
++
++      <div className="mt-8 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
++        <table className="w-full text-left text-sm">
++          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-4">Unit</th><th className="px-5 py-4">Dimension</th><th className="px-5 py-4">Base</th><th className="px-5 py-4">Factor to base</th></tr></thead>
++          <tbody>
++            {(units ?? []).map((unit) => (
++              <tr key={unit.code} className="border-t border-slate-100">
++                <td className="px-5 py-4"><p className="font-black text-slate-950">{unit.name}</p><p className="text-xs font-semibold text-slate-500">{unit.code}</p></td>
++                <td className="px-5 py-4 font-bold text-slate-700">{unit.dimension}</td>
++                <td className="px-5 py-4 font-bold text-slate-700">{unit.base_code}</td>
++                <td className="px-5 py-4 font-bold text-slate-700">{unit.factor_to_base === null ? "Contextual" : Number(unit.factor_to_base).toLocaleString()}</td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      </div>
++    </main>
++  );
++}
+diff --git a/src/lib/auth/require-organization.ts b/src/lib/auth/require-organization.ts
+new file mode 100644
+index 0000000..51eb44c
+--- /dev/null
++++ b/src/lib/auth/require-organization.ts
+@@ -0,0 +1,43 @@
++import { redirect } from "next/navigation";
++import { requireUser } from "@/lib/auth/require-user";
++
++export async function requireOrganization() {
++  const { supabase, userId } = await requireUser();
++
++  const { data: organization, error: organizationError } = await supabase
++    .from("organizations")
++    .select("id,name,slug,inventory_model,currency_code,timezone")
++    .order("created_at", { ascending: true })
++    .limit(1)
++    .maybeSingle();
++
++  if (organizationError) {
++    throw new Error(`Unable to load organization: ${organizationError.message}`);
++  }
++
++  if (!organization) {
++    redirect("/onboarding");
++  }
++
++  const { data: membership, error: membershipError } = await supabase
++    .from("organization_members")
++    .select("role")
++    .eq("organization_id", organization.id)
++    .eq("user_id", userId)
++    .maybeSingle();
++
++  if (membershipError) {
++    throw new Error(`Unable to load organization membership: ${membershipError.message}`);
++  }
++
++  if (!membership) {
++    redirect("/login");
++  }
++
++  return {
++    supabase,
++    userId,
++    organization,
++    role: membership.role as "OWNER" | "ADMIN" | "ACCOUNTANT" | "CASHIER" | "INVENTORY_STAFF" | "VIEWER",
++  };
++}
+diff --git a/supabase/migrations/20260922000400_products_units_stocks.sql b/supabase/migrations/20260922000400_products_units_stocks.sql
+new file mode 100644
+index 0000000..47cc387
+--- /dev/null
++++ b/supabase/migrations/20260922000400_products_units_stocks.sql
+@@ -0,0 +1,382 @@
++-- Vouxr Business OS — Products + Units + Stocks (v0.3.0)
++-- Adds stock categories, safe unit conversion, derived inventory/stock balances,
++-- product tracking validation, and an atomic stock-item opening balance workflow.
++
++begin;
++
++create table public.stock_categories (
++  id uuid primary key default gen_random_uuid(),
++  organization_id uuid not null references public.organizations(id) on delete cascade,
++  name text not null check (length(trim(name)) > 0),
++  status public.record_status not null default 'ACTIVE',
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now(),
++  unique (organization_id, id),
++  unique (organization_id, name)
++);
++
++alter table public.stock_items
++  add column if not exists stock_category_id uuid;
++
++alter table public.stock_items
++  add constraint stock_items_category_org_fk
++  foreign key (organization_id, stock_category_id)
++  references public.stock_categories(organization_id, id)
++  on delete set null;
++
++create index if not exists stock_categories_org_idx
++  on public.stock_categories(organization_id);
++create index if not exists stock_items_org_category_idx
++  on public.stock_items(organization_id, stock_category_id);
++
++-- Count containers are valid base units, but their conversion to another count unit
++-- is contextual (for example, one "box" may contain a different number of pieces
++-- depending on the item). A null factor intentionally prevents unsafe universal conversion.
++alter table public.units
++  alter column factor_to_base drop not null;
++
++insert into public.units(code, name, dimension, factor_to_base, base_code) values
++  ('pack', 'Pack', 'COUNT', null, 'piece'),
++  ('box', 'Box', 'COUNT', null, 'piece'),
++  ('bottle', 'Bottle', 'COUNT', null, 'piece'),
++  ('can', 'Can', 'COUNT', null, 'piece'),
++  ('bag', 'Bag', 'COUNT', null, 'piece'),
++  ('tray', 'Tray', 'COUNT', null, 'piece')
++on conflict (code) do nothing;
++
++create or replace function public.convert_unit_quantity(
++  p_quantity numeric,
++  p_from_unit text,
++  p_to_unit text
++)
++returns numeric
++language plpgsql
++stable
++security invoker
++set search_path = ''
++as $$
++declare
++  v_from public.units%rowtype;
++  v_to public.units%rowtype;
++begin
++  if p_quantity is null then
++    return null;
++  end if;
++
++  if p_from_unit = p_to_unit then
++    return p_quantity;
++  end if;
++
++  select * into v_from from public.units where code = p_from_unit;
++  select * into v_to from public.units where code = p_to_unit;
++
++  if v_from.code is null or v_to.code is null then
++    raise exception 'unknown unit conversion: % to %', p_from_unit, p_to_unit
++      using errcode = '22023';
++  end if;
++
++  if v_from.dimension <> v_to.dimension then
++    raise exception 'cannot convert between % and % dimensions', v_from.dimension, v_to.dimension
++      using errcode = '22023';
++  end if;
++
++  if v_from.factor_to_base is null or v_to.factor_to_base is null then
++    raise exception 'conversion between contextual count units requires an item-specific conversion'
++      using errcode = '22023';
++  end if;
++
++  return p_quantity * v_from.factor_to_base / v_to.factor_to_base;
++end;
++$$;
++
++revoke all on function public.convert_unit_quantity(numeric, text, text) from public, anon;
++grant execute on function public.convert_unit_quantity(numeric, text, text) to authenticated;
++
++create or replace function private.validate_product_tracking()
++returns trigger
++language plpgsql
++set search_path = ''
++as $$
++declare
++  v_inventory_model public.inventory_model;
++begin
++  select inventory_model
++    into v_inventory_model
++    from public.organizations
++    where id = new.organization_id;
++
++  if v_inventory_model is null then
++    raise exception 'organization not found' using errcode = '23503';
++  end if;
++
++  if v_inventory_model = 'DIRECT_INVENTORY' and new.tracking_method = 'RECIPE' then
++    raise exception 'recipe-tracked products are not available for direct-inventory organizations'
++      using errcode = '22023';
++  end if;
++
++  if new.tracking_method = 'DIRECT' then
++    if new.direct_unit_code is null or new.reorder_level is null then
++      raise exception 'direct products require a unit and reorder level'
++        using errcode = '22023';
++    end if;
++  else
++    new.direct_unit_code := null;
++    new.reorder_level := null;
++  end if;
++
++  return new;
++end;
++$$;
++
++drop trigger if exists products_tracking_guard on public.products;
++create trigger products_tracking_guard
++before insert or update on public.products
++for each row execute function private.validate_product_tracking();
++
++create or replace view public.product_inventory_balances
++with (security_invoker = true)
++as
++select
++  p.id,
++  p.organization_id,
++  p.category_id,
++  p.name,
++  p.sku,
++  p.barcode,
++  p.description,
++  p.image_url,
++  p.selling_price,
++  p.tax_rate,
++  p.status,
++  p.tracking_method,
++  p.direct_unit_code,
++  p.reorder_level,
++  p.created_at,
++  p.updated_at,
++  coalesce(sum(m.quantity_delta), 0)::numeric(18,6) as current_quantity,
++  coalesce(sum(m.quantity_delta * coalesce(m.unit_cost, 0)), 0)::numeric(18,4) as inventory_value,
++  case
++    when coalesce(sum(m.quantity_delta), 0) > 0
++      then (sum(m.quantity_delta * coalesce(m.unit_cost, 0)) / sum(m.quantity_delta))::numeric(18,6)
++    else 0::numeric
++  end as average_cost
++from public.products p
++left join public.inventory_movements m
++  on m.organization_id = p.organization_id
++ and m.product_id = p.id
++group by p.id;
++
++grant select on public.product_inventory_balances to authenticated;
++
++create or replace view public.stock_item_balances
++with (security_invoker = true)
++as
++select
++  s.id,
++  s.organization_id,
++  s.stock_category_id,
++  s.name,
++  s.sku,
++  s.category,
++  s.base_unit_code,
++  s.reorder_level,
++  s.preferred_supplier_name,
++  s.status,
++  s.created_at,
++  s.updated_at,
++  coalesce(sum(m.quantity_delta), 0)::numeric(18,6) as current_quantity,
++  coalesce(sum(m.quantity_delta * coalesce(m.unit_cost, 0)), 0)::numeric(18,4) as stock_value,
++  case
++    when coalesce(sum(m.quantity_delta), 0) > 0
++      then (sum(m.quantity_delta * coalesce(m.unit_cost, 0)) / sum(m.quantity_delta))::numeric(18,6)
++    else 0::numeric
++  end as average_cost,
++  (
++    select sm.unit_cost
++    from public.stock_movements sm
++    where sm.organization_id = s.organization_id
++      and sm.stock_item_id = s.id
++      and sm.movement_type = 'PURCHASE'
++      and sm.unit_cost is not null
++    order by sm.created_at desc, sm.id desc
++    limit 1
++  ) as last_purchase_cost
++from public.stock_items s
++left join public.stock_movements m
++  on m.organization_id = s.organization_id
++ and m.stock_item_id = s.id
++group by s.id;
++
++grant select on public.stock_item_balances to authenticated;
++
++create or replace function public.create_stock_item_with_opening_balance(
++  p_organization_id uuid,
++  p_name text,
++  p_sku text,
++  p_stock_category_id uuid,
++  p_base_unit_code text,
++  p_reorder_level numeric,
++  p_preferred_supplier_name text,
++  p_status public.record_status,
++  p_opening_quantity numeric default 0,
++  p_opening_unit_cost numeric default null
++)
++returns uuid
++language plpgsql
++security invoker
++set search_path = ''
++as $$
++declare
++  v_user_id uuid := (select auth.uid());
++  v_stock_item_id uuid;
++  v_inventory_model public.inventory_model;
++begin
++  if v_user_id is null then
++    raise exception 'authentication required' using errcode = '42501';
++  end if;
++
++  if not private.has_org_role(
++    p_organization_id,
++    array['OWNER','ADMIN','INVENTORY_STAFF']::public.organization_role[]
++  ) then
++    raise exception 'insufficient organization permission' using errcode = '42501';
++  end if;
++
++  select inventory_model into v_inventory_model
++  from public.organizations
++  where id = p_organization_id;
++
++  if v_inventory_model <> 'RECIPE_AND_STOCK' then
++    raise exception 'ingredient stock management is only available for recipe-and-stock organizations'
++      using errcode = '22023';
++  end if;
++
++  if length(trim(p_name)) < 1 then
++    raise exception 'stock item name is required' using errcode = '22023';
++  end if;
++
++  if p_reorder_level is null or p_reorder_level < 0 then
++    raise exception 'reorder level must be zero or greater' using errcode = '22023';
++  end if;
++
++  if coalesce(p_opening_quantity, 0) < 0 then
++    raise exception 'opening quantity cannot be negative' using errcode = '22023';
++  end if;
++
++  if p_opening_unit_cost is not null and p_opening_unit_cost < 0 then
++    raise exception 'opening unit cost cannot be negative' using errcode = '22023';
++  end if;
++
++  insert into public.stock_items (
++    organization_id,
++    stock_category_id,
++    name,
++    sku,
++    base_unit_code,
++    reorder_level,
++    preferred_supplier_name,
++    status
++  )
++  values (
++    p_organization_id,
++    p_stock_category_id,
++    trim(p_name),
++    nullif(trim(p_sku), ''),
++    p_base_unit_code,
++    p_reorder_level,
++    nullif(trim(p_preferred_supplier_name), ''),
++    coalesce(p_status, 'ACTIVE')
++  )
++  returning id into v_stock_item_id;
++
++  if coalesce(p_opening_quantity, 0) > 0 then
++    insert into public.stock_movements (
++      organization_id,
++      stock_item_id,
++      movement_type,
++      quantity_delta,
++      unit_cost,
++      source_type,
++      source_id,
++      note,
++      created_by
++    )
++    values (
++      p_organization_id,
++      v_stock_item_id,
++      'OPENING',
++      p_opening_quantity,
++      p_opening_unit_cost,
++      'STOCK_ITEM_SETUP',
++      v_stock_item_id,
++      'Opening balance',
++      v_user_id
++    );
++  end if;
++
++  insert into public.audit_logs (
++    organization_id,
++    actor_user_id,
++    action,
++    entity_type,
++    entity_id,
++    new_value
++  )
++  values (
++    p_organization_id,
++    v_user_id,
++    'STOCK_ITEM_CREATED',
++    'stock_item',
++    v_stock_item_id,
++    jsonb_build_object(
++      'name', trim(p_name),
++      'sku', nullif(trim(p_sku), ''),
++      'base_unit_code', p_base_unit_code,
++      'opening_quantity', coalesce(p_opening_quantity, 0),
++      'opening_unit_cost', p_opening_unit_cost
++    )
++  );
++
++  return v_stock_item_id;
++end;
++$$;
++
++revoke all on function public.create_stock_item_with_opening_balance(
++  uuid, text, text, uuid, text, numeric, text, public.record_status, numeric, numeric
++) from public, anon;
++grant execute on function public.create_stock_item_with_opening_balance(
++  uuid, text, text, uuid, text, numeric, text, public.record_status, numeric, numeric
++) to authenticated;
++
++alter table public.stock_categories enable row level security;
++grant select, insert, update on public.stock_categories to authenticated;
++
++create policy stock_categories_org_select on public.stock_categories
++for select to authenticated
++using (private.is_org_member(organization_id));
++
++create policy stock_categories_inventory_insert on public.stock_categories
++for insert to authenticated
++with check (
++  private.has_org_role(
++    organization_id,
++    array['OWNER','ADMIN','INVENTORY_STAFF']::public.organization_role[]
++  )
++);
++
++create policy stock_categories_inventory_update on public.stock_categories
++for update to authenticated
++using (
++  private.has_org_role(
++    organization_id,
++    array['OWNER','ADMIN','INVENTORY_STAFF']::public.organization_role[]
++  )
++)
++with check (
++  private.has_org_role(
++    organization_id,
++    array['OWNER','ADMIN','INVENTORY_STAFF']::public.organization_role[]
++  )
++);
++
++commit;

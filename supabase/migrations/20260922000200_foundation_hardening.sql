@@ -5,7 +5,14 @@ begin;
 
 -- The project-level event trigger can remain SECURITY DEFINER, but it must not
 -- be callable through the Data API by anon/authenticated clients.
-revoke execute on function public.rls_auto_enable() from public, anon, authenticated;
+do $$
+begin
+  if to_regprocedure('public.rls_auto_enable()') is not null then
+    execute
+      'revoke execute on function public.rls_auto_enable() from public, anon, authenticated';
+  end if;
+end
+$$;
 
 -- Replace FOR ALL policies with action-specific write policies so SELECT uses
 -- only the tenant-scoped read policy.

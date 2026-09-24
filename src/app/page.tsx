@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   Boxes,
   Calculator,
@@ -34,8 +35,19 @@ export default function HomePage() {
           <p className="text-xs font-black uppercase tracking-[0.28em] text-sky-600">Vouxr</p>
           <h1 className="mt-1 text-lg font-black tracking-tight text-slate-950">Business OS</h1>
         </div>
-        <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700">
-          Foundation v0.1.0
+        <div className="flex items-center gap-2">
+          <Link
+            href="/login"
+            className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50"
+          >
+            Sign in
+          </Link>
+          <Link
+            href="/signup"
+            className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-black text-white hover:bg-slate-800"
+          >
+            Get started
+          </Link>
         </div>
       </header>
 
